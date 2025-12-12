@@ -13,9 +13,6 @@
 #include <memory>
 #include <iomanip>
 
-// 单例
-#define MultiThreadPrinter (MultiThreadPrinter::GetInstance())
-
 // 颜色
 #define RESET   "\033[0m"
 #define RED     "\033[31m"
@@ -34,11 +31,11 @@ inline char separator();
 
 const char *file_name(const char *path);
 
-#define REGISTER(key) (MultiThreadPrinter.Register(key))
-#define INFO(key, msg) (MultiThreadPrinter.Info(key, msg, file_name(__FILE__), __LINE__, __func__))
-#define DEBUG(key, msg) (MultiThreadPrinter.Debug(key, msg, file_name(__FILE__), __LINE__, __func__))
-#define WARN(key, msg) (MultiThreadPrinter.Warn(key, msg, file_name(__FILE__), __LINE__, __func__))
-#define ERROR(key, msg) (MultiThreadPrinter.Error(key, msg, file_name(__FILE__), __LINE__, __func__))
+#define REGISTER(key) (MultiThreadPrinter::GetInstance().Register(key))
+#define INFO(key, msg) (MultiThreadPrinter::GetInstance().Info(key, msg, file_name(__FILE__), __LINE__, __func__))
+#define DEBUG(key, msg) (MultiThreadPrinter::GetInstance().Debug(key, msg, file_name(__FILE__), __LINE__, __func__))
+#define WARN(key, msg) (MultiThreadPrinter::GetInstance().Warn(key, msg, file_name(__FILE__), __LINE__, __func__))
+#define ERROR(key, msg) (MultiThreadPrinter::GetInstance().Error(key, msg, file_name(__FILE__), __LINE__, __func__))
 
 class MultiThreadPrinter {
 private:
