@@ -5,7 +5,7 @@
 #include <algorithm>
 
 template <typename VecType>
-class SVGD {
+class SVGDCaculator {
 public:
     using ScoreFunction = std::function<VecType(const VecType&)>;
 

@@ -8,7 +8,8 @@ if(NOT glfw3_FOUND)
 endif()
 
 # 2. Define your executable (You already have this line)
-add_executable(TestSVGDSimulator SVGDSimulator_t.cpp)
+#add_executable(TestSVGDSimulator P2dSVGDSimulator_t.cpp)
+add_executable(TestSVGDSimulator P3dSVGDSimulator_t.cpp)
 
 # 3. LINK LIBRARIES (This is the missing part!)
 # You must link OpenGL::GL and OpenGL::GLU to 'TestSVGDSimulator'
