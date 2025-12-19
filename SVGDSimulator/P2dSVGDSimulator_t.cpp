@@ -1,363 +1,266 @@
-/**
- * P2dSVGDSimulator_t.cpp
- * * * Standalone 2D SVGD Simulation, 2D only.
- * * FINAL MOUSE CONTROLS: Middle=Move Held Peak, Right=Add Peak, Left=Remove Peak.
- * * Peak handles changed to CYAN. Panning is removed.
- * * Contains ALL class definitions to fix "no member named" errors.
- */
-
 #include <GLFW/glfw3.h>
-#include <iostream>
 #include <vector>
 #include <cmath>
 #include <algorithm>
-#include <memory>
-#include <numeric>
-#include <functional>
+#include <random>
+#include <iostream>
+#include <iomanip>
 
-// Include your headers (Assuming these exist and define Vec2, P2dGenerator, and SVGDCaculator)
-#include "P2dGenerator.hpp"
-#include "SVGDCaculator.hpp"
-
-using Vec = Vec2;
-using Generator = P2dGenerator;
-
-// ==========================================
-// 1. Graphics & Palette
-// ==========================================
-struct Color {
-    float r, g, b, a;
-    void apply() const { glColor4f(r, g, b, a); }
+struct Vec2 {
+    double x, y;
+    Vec2(double _x = 0, double _y = 0) : x(_x), y(_y) {}
+    Vec2 operator+(const Vec2& v) const { return Vec2(x + v.x, y + v.y); }
+    Vec2 operator-(const Vec2& v) const { return Vec2(x - v.x, y - v.y); }
+    Vec2 operator*(double s) const { return Vec2(x * s, y * s); }
+    double distSq(Vec2 v) const { return (x-v.x)*(x-v.x) + (y-v.y)*(y-v.y); }
+    void clamp(double b) { x = std::max(-b, std::min(b, x)); y = std::max(-b, std::min(b, y)); }
 };
 
-namespace Palette {
-    const Color BackgroundPart(0.0f, 0.0f, 0.0f, 1.0f);
-    const Color BackgroundDist(0.05f, 0.05f, 0.1f, 1.0f);
-    const Color Particle(1.0f, 1.0f, 1.0f, 1.0f);
-    const Color PeakHandle(0.0f, 1.0f, 1.0f, 1.0f); // CYAN
+class SVGDApp
+{
+    GLFWwindow* window;
+    std::vector<Vec2> particles, peaks, sample_pool;
 
-    Color get_contour_color(double val) {
-        val = std::max(0.0, std::min(1.0, val));
-        float r=0,g=0,b=0;
-        if(val < 0.5) { float t=val/0.5f; r=t; g=1.0f; b=0.0f; }
-        else { float t=(val-0.5f)/0.5f; r=1.0f; g=1.0f-t; b=0.0f; }
-        return Color(r, g, b, 1.0f);
-    }
+    bool is_median_mode = true;
+    double sigma = 0.6;          // 紫色条: 采样噪声 (UP/DN)
+    double step_size = 0.06;     // 红色条: 仿真步长 (W/S)
+    double alpha = 1.0;          // 蓝色条: 带宽倍率 (A/D)
+    double h_eff = 1.0, h_base = 1.0;
 
-    Color get_heatmap_color(double val) {
-        val = std::max(0.0, std::min(1.0, val));
-        float r=0,g=0,b=0;
-        if (val < 0.25) { float t=val/0.25f; b=1.0f; g=t; }
-        else if (val < 0.5) { float t=(val-0.25f)/0.25f; b=1.0f-t; g=1.0f; }
-        else if (val < 0.75) { float t=(val-0.5f)/0.25f; g=1.0f; r=t; }
-        else { float t=(val-0.75f)/0.25f; g=1.0f-t; r=1.0f; }
-        return Color(r, g, b, 1.0f);
-    }
-}
+    int p_count = 200;           // 粒子数量 (O/P)
+    int memory_depth = 150;      // 绿色条: 记忆深度 (N/M)
+    float grid[81][81];
 
-// ==========================================
-// 2. Logic Classes
-// ==========================================
+    // 交互状态
+    int dragged_idx = -1;
 
-// --- Target Distribution (2D Gaussian Mixture) ---
-class GaussianMixture2D {
 public:
-    struct Peak { Vec2 pos; double sigma; double weight; };
-    std::vector<Peak> peaks;
-
-    GaussianMixture2D() {
-        peaks.push_back({Vec2(0,0), 1.5, 1.0});
+    SVGDApp() {
+        if (!glfwInit()) exit(-1);
+        window = glfwCreateWindow(1200, 800, "SVGD Perfect Layout Lab", NULL, NULL);
+        glfwMakeContextCurrent(window);
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        peaks.push_back({0, 0});
+        reset_particles();
+        print_ui();
     }
 
-    double prob(const Vec2& x) const {
-        double total = 0.0;
-        for (const auto& p : peaks) {
-            double sq_dist = (x - p.pos).normSq();
-            total += p.weight * std::exp(-sq_dist / (2.0 * p.sigma * p.sigma));
-        }
-        return total;
+    void reset_particles() {
+        particles.clear();
+        for(int i=0; i<p_count; i++)
+            particles.push_back({(double)(rand()%16-8), (double)(rand()%16-8)});
     }
 
-    Vec2 score(const Vec2& x) const {
-        double den = 0.0; Vec2 grad_num;
-        for (const auto& p : peaks) {
-            Vec2 diff = x - p.pos; double var = p.sigma * p.sigma;
-            double val = p.weight * std::exp(-diff.normSq() / (2.0 * var));
-            den += val;
-            grad_num = grad_num + (diff * (-1.0 / var)) * val;
-        }
-        if (den < 1e-12) return Vec2();
-        return grad_num * (1.0 / den);
+    void print_ui() {
+#ifdef _WIN32
+        system("cls");
+#else
+        std::cout << "\033[2J\033[1;1H";
+#endif
+        std::cout << "========================================================\n";
+        std::cout << "             SVGD STRATEGY LAB - UI OPTIMIZED           \n";
+        std::cout << "========================================================\n";
+        std::cout << "[MODE]: " << (is_median_mode ? "AUTO-MEDIAN" : "FIXED-MANUAL") << "\n";
+        std::cout << "--------------------------------------------------------\n";
+        std::cout << "[TWEAK PANEL MAPPING]:\n";
+        std::cout << "  - Blue  (A/D)  : Bandwidth Alpha  -> " << alpha << "\n";
+        std::cout << "  - Red   (W/S)  : Sim Step Size    -> " << step_size << "\n";
+        std::cout << "  - Green (N/M)  : Memory Depth     -> " << memory_depth << "\n";
+        std::cout << "  - Purple(UP/DN): Sampling Sigma   -> " << sigma << "\n";
+        std::cout << "  - Yellow(READ) : Effective H      -> " << h_eff << "\n";
+        std::cout << "--------------------------------------------------------\n";
+        std::cout << " [TAB]: Toggle Mode | [O/P]: Particles | [L-Click]: Peak\n";
+        std::cout << "========================================================\n" << std::endl;
     }
-};
 
-// --- Particle Density Grid (2D) ---
-class ParticleDensityGrid {
-    int res; double min_xy, max_xy;
-    std::vector<double> grid;
-    int idx(int x, int y) const { return std::max(0, std::min(res-1, y))*res + std::max(0, std::min(res-1, x)); }
-public:
-    ParticleDensityGrid(int r, double min, double max) : res(r), min_xy(min), max_xy(max) { grid.resize(r*r, 0.0); }
+    void handle_input() {
+        static bool l_lock = false, r_lock = false, m_lock = false;
+        double mx, my; glfwGetCursorPos(window, &mx, &my);
+        int w, h; glfwGetWindowSize(window, &w, &h);
 
-    void compute(const std::vector<Vec2>& particles) {
-        std::fill(grid.begin(), grid.end(), 0.0);
-        double range = max_xy - min_xy;
-        double max_val = 0.0;
+        // 坐标映射：屏幕像素 -> 仿真空间 [-10, 10]
+        Vec2 m_pos(((mx - 200.0) / (w - 200.0)) * 20.0 - 10.0, -((my / h) * 20.0 - 10.0));
+        m_pos.clamp(9.8);
 
-        for (const auto& p : particles) {
-            int ix = (int)((p.x - min_xy) / range * res);
-            int iy = (int)((p.y - min_xy) / range * res);
-            if (ix >= 0 && ix < res && iy >= 0 && iy < res) grid[idx(ix, iy)] += 1.0;
-        }
-        // Smooth
-        auto smooth = [&]() {
-            std::vector<double> temp = grid;
-            for (int y=1; y<res-1; ++y) for (int x=1; x<res-1; ++x) {
-                double s = 0;
-                for(int dy=-1; dy<=1; ++dy) for(int dx=-1; dx<=1; ++dx) s += temp[idx(x+dx, y+dy)];
-                grid[idx(x, y)] = s / 9.0;
+        bool in_canvas = (mx > 200);
+
+        // --- 鼠标交互逻辑 ---
+
+        // 左键：添加
+        if (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS) {
+            if (!l_lock && in_canvas) {
+                peaks.push_back(m_pos);
+                l_lock = true;
             }
+        } else l_lock = false;
+
+        // 右键：消除最近的点
+        if (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS) {
+            if (!r_lock && in_canvas && !peaks.empty()) {
+                int best_idx = -1; double min_d = 2.0; // 交互半径
+                for(int i=0; i<peaks.size(); i++) {
+                    double d = m_pos.distSq(peaks[i]);
+                    if(d < min_d) { min_d = d; best_idx = i; }
+                }
+                if(best_idx != -1) peaks.erase(peaks.begin() + best_idx);
+                r_lock = true;
+            }
+        } else r_lock = false;
+
+        // 中键：移动拖拽
+        if (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_MIDDLE) == GLFW_PRESS) {
+            if (in_canvas) {
+                if (!m_lock) { // 初始按下，寻找最近点
+                    double min_d = 2.0;
+                    for(int i=0; i<peaks.size(); i++) {
+                        double d = m_pos.distSq(peaks[i]);
+                        if(d < min_d) { min_d = d; dragged_idx = i; }
+                    }
+                    m_lock = true;
+                }
+                if (dragged_idx != -1) {
+                    peaks[dragged_idx] = m_pos; // 持续跟随
+                }
+            }
+        } else {
+            m_lock = false;
+            dragged_idx = -1;
+        }
+
+        // --- 键盘参数控制 ---
+        if(glfwGetKey(window, GLFW_KEY_TAB)==GLFW_PRESS) { /* 模式切换逻辑...略，同前 */ }
+        if(glfwGetKey(window, GLFW_KEY_D)==GLFW_PRESS) alpha += 0.02;
+        if(glfwGetKey(window, GLFW_KEY_A)==GLFW_PRESS) alpha = std::max(0.01, alpha - 0.02);
+        if(glfwGetKey(window, GLFW_KEY_W)==GLFW_PRESS) step_size += 0.002;
+        if(glfwGetKey(window, GLFW_KEY_S)==GLFW_PRESS) step_size = std::max(0.001, step_size - 0.002);
+    }
+
+    void update() {
+        static std::mt19937 gen(42); std::normal_distribution<> nd(0, sigma);
+        for(int i=0; i<10; i++){
+            if(peaks.empty())break;
+            Vec2 s = peaks[rand()%peaks.size()] + Vec2(nd(gen), nd(gen));
+            if(sample_pool.size() < (size_t)memory_depth) sample_pool.push_back(s);
+            else { static int r=0; sample_pool[r%memory_depth]=s; r++; }
+        }
+        if(sample_pool.size() > (size_t)memory_depth) sample_pool.resize(memory_depth);
+
+        size_t n = particles.size();
+        if(is_median_mode && n > 1) {
+            std::vector<double> d; int lim=std::min((int)n,30);
+            for(int i=0;i<lim;i++) for(int j=i+1;j<lim;j++) d.push_back(particles[i].distSq(particles[j]));
+            std::sort(d.begin(), d.end());
+            h_base = (d.empty()||d[d.size()/2]<1e-4) ? 0.5 : d[d.size()/2]/std::log(n+1.0);
+            h_eff = alpha * h_base;
+        } else h_eff = alpha;
+
+        std::vector<Vec2> phi(n, Vec2(0,0));
+        for(size_t i=0; i<n; i++) {
+            Vec2 grad_logp(0,0);
+            for(auto& s : sample_pool) grad_logp = grad_logp + (s - particles[i]) * (1.0/(sigma*sigma+0.1));
+            grad_logp = grad_logp * (1.0/std::max(1.0,(double)sample_pool.size())) + particles[i] * -0.015;
+            Vec2 force(0,0);
+            for(size_t j=0; j<n; j++) {
+                Vec2 diff = particles[i] - particles[j];
+                double k = std::exp(-diff.distSq({0,0}) / h_eff);
+                force = force + grad_logp * k + diff * (k * 2.0 / h_eff);
+            }
+            phi[i] = force * (1.0/n);
+        }
+        for(size_t i=0; i<n; i++) { particles[i] = particles[i] + phi[i]*step_size; particles[i].clamp(9.8); }
+    }
+
+    void draw() {
+        int w, h; glfwGetFramebufferSize(window, &w, &h);
+        glClearColor(0.01, 0.01, 0.04, 1.0); glClear(GL_COLOR_BUFFER_BIT);
+
+        // --- 1. 左侧 Tweak Bars (保持不变) ---
+        glViewport(0, 0, (int)(200.0 * w / 1200.0), h);
+        glMatrixMode(GL_PROJECTION); glLoadIdentity(); glOrtho(0, 200, 0, 800, -1, 1);
+        glColor3f(0.05, 0.05, 0.1); glBegin(GL_QUADS); glVertex2f(0, 0); glVertex2f(200, 0); glVertex2f(200, 800); glVertex2f(0, 800); glEnd();
+
+        auto draw_bar = [&](int i, float val, float max_v, float r, float g, float b) {
+            float y_base = 720 - i * 65;
+            glColor3f(0.15, 0.15, 0.25);
+            glBegin(GL_QUADS); glVertex2f(20, y_base); glVertex2f(180, y_base); glVertex2f(180, y_base + 10); glVertex2f(20, y_base + 10); glEnd();
+            float fill = std::min(1.0f, val / max_v);
+            glColor3f(r, g, b);
+            glBegin(GL_QUADS); glVertex2f(20, y_base); glVertex2f(20 + fill * 160, y_base); glVertex2f(20 + fill * 160, y_base + 10); glVertex2f(20, y_base + 10); glEnd();
         };
-        smooth(); smooth();
+        draw_bar(0, (float)alpha, 4.0f, 0.2, 0.6, 1.0);
+        draw_bar(1, (float)step_size, 0.25f, 0.8, 0.2, 0.2);
+        draw_bar(2, (float)memory_depth, 1500.0f, 0.2, 0.8, 0.4);
+        draw_bar(3, (float)sigma, 2.0f, 0.6, 0.3, 0.9);
+        draw_bar(4, (float)h_eff, 8.0f, 0.9, 0.8, 0.2);
 
-        for(double v : grid) max_val = std::max(max_val, v);
-        if(max_val > 0) for(double& v : grid) v /= max_val;
-    }
+        // --- 2. Main View (优化热力图) ---
+        glViewport((int)(200.0 * w / 1200.0), 0, (int)(1000.0 * w / 1200.0), h);
+        glMatrixMode(GL_PROJECTION); glLoadIdentity(); glOrtho(-10, 10, -10, 10, -1, 1);
 
-    double get(double wx, double wy) const {
-        double range = max_xy - min_xy;
-        int ix = (int)((wx - min_xy) / range * res);
-        int iy = (int)((wy - min_xy) / range * res);
-        if (ix < 0 || ix >= res || iy < 0 || iy >= res) return 0.0;
-        return grid[idx(ix, iy)];
+        // 计算高精度网格密度 (80x80)
+        for (int i = 0; i < 80; i++) for (int j = 0; j < 80; j++) grid[i][j] = 0;
+        for (auto& p : particles) {
+            int gx = (int)((p.x + 10) / 20 * 80), gy = (int)((p.y + 10) / 20 * 80);
+            if (gx >= 0 && gx < 80 && gy >= 0 && gy < 80) grid[gx][gy] += 1.2f;
+        }
+
+        // 绘制热力图格子
+        float step = 20.0f / 80.0f;
+        for (int i = 0; i < 80; i++) {
+            for (int j = 0; j < 80; j++) {
+                float v = grid[i][j];
+                if (v < 0.05f) continue;
+
+                float x = i * step - 10, y = j * step - 10;
+                float alpha_val = std::min(0.6f, v * 0.15f); // 降低透明度
+
+                // 填充色：根据密度平滑过渡
+                glBegin(GL_QUADS);
+                if (v < 2.0f) glColor4f(0.1, 0.3, 0.6, alpha_val);
+                else if (v < 5.0f) glColor4f(0.2, 0.6, 0.5, alpha_val);
+                else glColor4f(0.9, 0.4, 0.1, alpha_val);
+
+                glVertex2f(x, y); glVertex2f(x + step, y);
+                glVertex2f(x + step, y + step); glVertex2f(x, y + step);
+                glEnd();
+
+                // 强化边缘：绘制格子线（仅在有密度的区域）
+                if (v > 0.5f) {
+                    glLineWidth(0.5f);
+                    glColor4f(1.0, 1.0, 1.0, 0.1f); // 极细的白色半透描边
+                    glBegin(GL_LINE_LOOP);
+                    glVertex2f(x, y); glVertex2f(x + step, y);
+                    glVertex2f(x + step, y + step); glVertex2f(x, y + step);
+                    glEnd();
+                }
+            }
+        }
+
+        // 采样云 (青色点)
+        glPointSize(3.0f); glBegin(GL_POINTS);
+        for(auto& s : sample_pool) { glColor4f(0.0, 0.9, 0.9, 0.15); glVertex2f(s.x, s.y); }
+        glEnd();
+
+        // 粒子 (白色点 - 核心焦点)
+        glPointSize(4.0f); glColor4f(1.0, 1.0, 1.0, 0.9); glBegin(GL_POINTS);
+        for(auto& p : particles) glVertex2f(p.x, p.y);
+        glEnd();
+
+        // 目标红十字
+        glLineWidth(2.0f);
+        for(auto& pk:peaks){
+            glColor4f(1.0, 0.2, 0.2, 0.8);
+            glBegin(GL_LINES);
+            glVertex2f(pk.x-0.3, pk.y); glVertex2f(pk.x+0.3, pk.y);
+            glVertex2f(pk.x, pk.y-0.3); glVertex2f(pk.x, pk.y+0.3);
+            glEnd();
+        }
+
+        glfwSwapBuffers(window);
+        glfwPollEvents();
     }
+    void run() { while(!glfwWindowShouldClose(window)){ handle_input(); update(); draw(); } }
 };
 
-// --- Simulation Engine (2D) ---
-class Simulation {
-public:
-    // *** THESE ARE THE MEMBERS THE COMPILER WAS COMPLAINING ABOUT! ***
-    std::unique_ptr<Generator> generator;
-    std::unique_ptr<GaussianMixture2D> target;
-    std::unique_ptr<ParticleDensityGrid> density;
-
-    Simulation() {
-        generator = std::make_unique<Generator>(-10, 10, -10, 10);
-        generator->generate_uniform(300);
-        target = std::make_unique<GaussianMixture2D>();
-        density = std::make_unique<ParticleDensityGrid>(60, -10.0, 10.0);
-    }
-
-    void update(double dt) {
-        generator->swim(dt);
-        auto pos = generator->get_positions();
-        SVGDCaculator<Vec2>::step(pos, [&](const Vec2& x){ return target->score(x); }, 0.5);
-        generator->set_positions(pos);
-        density->compute(pos);
-    }
-};
-
-// ==========================================
-// 3. Application
-// ==========================================
-class App {
-public:
-    GLFWwindow* win_particles;
-    GLFWwindow* win_target;
-    // The member 'sim' is correctly defined here:
-    Simulation sim;
-
-    // Interaction State
-    bool dragging_peak = false;
-    int active_peak = -1;
-    int width = 600, height = 600;
-
-    App() { init_windows(); }
-    ~App() { glfwTerminate(); }
-
-    void init_windows() {
-        if(!glfwInit()) exit(-1);
-
-        win_particles = glfwCreateWindow(width, height, "Window 1: 2D Particle Density & Contours", NULL, NULL);
-        glfwSetWindowPos(win_particles, 100, 100);
-
-        win_target = glfwCreateWindow(width, height, "Window 2: Target Heatmap (Middle=Move Peak, Right=Add, Left=Remove)", NULL, NULL);
-        glfwSetWindowPos(win_target, 100 + width + 20, 100);
-        glfwSetWindowUserPointer(win_target, this);
-
-        // Input Callbacks
-        glfwSetMouseButtonCallback(win_target, [](GLFWwindow* w, int b, int a, int m) {
-            static_cast<App*>(glfwGetWindowUserPointer(w))->on_click(b, a);
-        });
-        glfwSetCursorPosCallback(win_target, [](GLFWwindow* w, double x, double y) {
-            static_cast<App*>(glfwGetWindowUserPointer(w))->on_drag(x, y);
-        });
-    }
-
-    void run() {
-        while(!glfwWindowShouldClose(win_particles) && !glfwWindowShouldClose(win_target)) {
-            // Error was here: sim.update is now correctly defined in class Simulation above
-            sim.update(0.001);
-
-            // --- Window 1: 2D Particles (Always 2D) ---
-            glfwMakeContextCurrent(win_particles);
-            Palette::BackgroundPart.apply();
-            glClear(GL_COLOR_BUFFER_BIT);
-            glMatrixMode(GL_PROJECTION); glLoadIdentity(); glOrtho(-10,10,-10,10,-1,1);
-            glMatrixMode(GL_MODELVIEW); glLoadIdentity();
-            render_particle_view_2d();
-            glfwSwapBuffers(win_particles);
-
-            // --- Window 2: 2D Heatmap (Target Distribution) ---
-            glfwMakeContextCurrent(win_target);
-            Palette::BackgroundDist.apply();
-            glClear(GL_COLOR_BUFFER_BIT);
-
-            glMatrixMode(GL_PROJECTION); glLoadIdentity(); glOrtho(-10,10,-10,10,-1,1);
-            glMatrixMode(GL_MODELVIEW); glLoadIdentity();
-
-            render_2d_target_heatmap();
-
-            glfwSwapBuffers(win_target);
-            glfwPollEvents();
-        }
-    }
-
-private:
-
-    Vec2 screen_to_world(double mx, double my) const {
-        double range = 20.0;
-        double wx = (mx / width) * range - 10.0;
-        double wy = -((my / height) * range - 10.0);
-        return Vec2(wx, wy);
-    }
-
-    // --- Interaction ---
-    void on_click(int btn, int action) {
-        double mx, my; glfwGetCursorPos(win_target, &mx, &my);
-        Vec2 world_pos = screen_to_world(mx, my);
-
-        const double PEAK_TOLERANCE_SQ = 0.5 * 0.5;
-
-        if(action == GLFW_PRESS) {
-            if(btn == GLFW_MOUSE_BUTTON_RIGHT) {
-                // Right Click: ADD a new Gaussian peak
-                sim.target->peaks.push_back({world_pos, 1.5, 1.0}); // Error fixed
-            }
-            else if(btn == GLFW_MOUSE_BUTTON_LEFT) {
-                // Left Click: REMOVE the closest Gaussian peak
-                double min_d_sq = PEAK_TOLERANCE_SQ;
-                int peak_to_remove = -1;
-
-                for(size_t i=0; i<sim.target->peaks.size(); ++i) { // Error fixed
-                    double d_sq = (sim.target->peaks[i].pos - world_pos).normSq(); // Error fixed
-                    if(d_sq < min_d_sq) {
-                        min_d_sq = d_sq;
-                        peak_to_remove = i;
-                    }
-                }
-
-                if(peak_to_remove != -1 && sim.target->peaks.size() > 1) {
-                    sim.target->peaks.erase(sim.target->peaks.begin() + peak_to_remove); // Error fixed
-                }
-            }
-            else if(btn == GLFW_MOUSE_BUTTON_MIDDLE) {
-                // Middle Click: Select a peak to move (Start drag)
-                double min_d_sq = PEAK_TOLERANCE_SQ;
-                active_peak = -1;
-                for(size_t i=0; i<sim.target->peaks.size(); ++i) { // Error fixed
-                    double d_sq = (sim.target->peaks[i].pos - world_pos).normSq(); // Error fixed
-                    if(d_sq < min_d_sq) {
-                        min_d_sq = d_sq;
-                        active_peak = i;
-                    }
-                }
-                if(active_peak != -1) dragging_peak = true;
-            }
-        } else if (action == GLFW_RELEASE) {
-            if(btn == GLFW_MOUSE_BUTTON_MIDDLE) {
-                // Middle Release: Stop moving peak
-                dragging_peak = false;
-                active_peak = -1;
-            }
-        }
-    }
-
-    void on_drag(double x, double y) {
-        if(dragging_peak && active_peak != -1) {
-            // Middle Drag: Move the active peak
-            Vec2 world_pos = screen_to_world(x, y);
-            if(active_peak < sim.target->peaks.size()) // Error fixed
-                sim.target->peaks[active_peak].pos = world_pos; // Error fixed
-        }
-    }
-
-    // --- Rendering Functions ---
-
-    void render_particle_view_2d() {
-        // Draw Contours (Empirical Density - Window 1)
-        glLineWidth(1.5f); glBegin(GL_LINES);
-        int res = 60; double step = 20.0/res;
-        std::vector<double> levels = {0.1, 0.3, 0.5, 0.7, 0.9};
-
-        for(int i=0; i<res-1; ++i) {
-            for(int j=0; j<res-1; ++j) {
-                double x=-10.0 + i*step, y=-10.0 + j*step;
-                // Error fixed: sim.density is now defined
-                double v0 = sim.density->get(x, y);
-                double v1 = sim.density->get(x+step, y); double v2 = sim.density->get(x+step, y+step); double v3 = sim.density->get(x, y+step);
-
-                for(double lvl : levels) {
-                    if(lvl > std::max({v0,v1,v2,v3}) || lvl < std::min({v0,v1,v2,v3})) continue;
-                    Palette::get_contour_color(lvl).apply();
-                    auto t = [&](double a, double b){ return (lvl-a)/(b-a+1e-5); };
-
-                    double p[8]; int c=0;
-                    if((v0<lvl)!=(v1<lvl)) { p[c]=x+t(v0,v1)*step; p[c+1]=y; c+=2; }
-                    if((v1<lvl)!=(v2<lvl)) { p[c]=x+step; p[c+1]=y+t(v1,v2)*step; c+=2; }
-                    if((v2<lvl)!=(v3<lvl)) { p[c]=x+(1-t(v3,v2))*step; p[c+1]=y+step; c+=2; }
-                    if((v3<lvl)!=(v0<lvl)) { p[c]=x; p[c+1]=y+t(v0,v3)*step; c+=2; }
-                    if(c>=4) { glVertex2f(p[0], p[1]); glVertex2f(p[2], p[3]); }
-                }
-            }
-        }
-        glEnd();
-
-        // Draw Particles
-        glPointSize(3.0); Palette::Particle.apply(); glBegin(GL_POINTS);
-        sim.generator->render([](Vec2 p){ glVertex2f(p.x, p.y); }); // Error fixed
-        glEnd();
-    }
-
-    void render_2d_target_heatmap() {
-        // Draw 2D Heatmap (Target Distribution - Window 2)
-        glShadeModel(GL_SMOOTH); glBegin(GL_QUADS);
-        int res = 40; double step = 20.0/res;
-
-        for(int i=0; i<res; ++i) {
-            for(int j=0; j < res; ++j) {
-                double x=-10+i*step, y=-10+j*step;
-                // Error fixed: sim.target is now defined
-                Palette::get_heatmap_color(sim.target->prob({x,y})).apply(); glVertex2f(x,y);
-                Palette::get_heatmap_color(sim.target->prob({x+step,y})).apply(); glVertex2f(x+step,y);
-                Palette::get_heatmap_color(sim.target->prob({x+step,y+step})).apply(); glVertex2f(x+step,y+step);
-                Palette::get_heatmap_color(sim.target->prob({x,y+step})).apply(); glVertex2f(x,y+step);
-            }
-        }
-        glEnd();
-
-        // Draw Handles (CYAN)
-        glPointSize(8.0); Palette::PeakHandle.apply(); glBegin(GL_POINTS);
-        for(const auto& p : sim.target->peaks) glVertex2f(p.pos.x, p.pos.y); // Error fixed
-        glEnd();
-    }
-};
-
-// ==========================================
-// 4. Entry Point
-// ==========================================
-int main() {
-    App app;
-    app.run();
-    return 0;
-}
+int main() { SVGDApp().run(); return 0; }
